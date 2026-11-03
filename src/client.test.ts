@@ -50,6 +50,44 @@ describe("parseContentDispositionFilename", () => {
   });
 });
 
+describe("OpenArchiverClient security", () => {
+  it("rejects malformed Unicode path inputs with sanitized errors", async () => {
+    const client = new OpenArchiverClient("https://host", "key", async () => { throw new Error("must not fetch"); });
+    await assert.rejects(client.getEmail("\ud800"), (error: unknown) => error instanceof OpenArchiverError && error.message === "Invalid email id.");
+    await assert.rejects(client.download("a/\ud800"), (error: unknown) => error instanceof OpenArchiverError && error.message === "Invalid storage path.");
+  });
+  it("rejects unsafe storage paths before fetching", async () => {
+    let fetched = 0;
+    const client = new OpenArchiverClient("https://host", "key", async () => { fetched++; return new Response("x"); });
+    for (const path of ["", ".", "..", "/absolute", "//host/path", "a/../b", "a/./b", "a//b", "a/", "a\\b", "a%2f..%2fb", "a?secret", "a#secret", "a\u0000b"]) {
+      await assert.rejects(client.download(path), /Invalid storage path/);
+    }
+    assert.equal(fetched, 0);
+  });
+  it("rejects ambiguous IDs before URL dot-segment normalization", async () => {
+    let fetched = 0;
+    const client = new OpenArchiverClient("https://host", "key", async () => { fetched++; return jsonResponse([]); });
+    for (const id of [".", "..", "a/../b", "%2e%2e", "a%2fb", "a\\b", "", "x\nsecret"]) {
+      await assert.rejects(client.getEmail(id), /Invalid email id/);
+      await assert.rejects(client.checkIntegrity(id), /Invalid email id/);
+    }
+    assert.equal(fetched, 0);
+  });
+  it("permits HTTP only for explicitly opted-in loopback constructors", () => {
+    assert.throws(() => new OpenArchiverClient("http://127.0.0.1:8123", "key"), /HTTPS/);
+    assert.doesNotThrow(() => new OpenArchiverClient("http://127.0.0.1:8123", "key", fetch, 30_000, { allowHttpLoopback: true }));
+    assert.throws(() => new OpenArchiverClient("http://remote.example", "key", fetch, 30_000, { allowHttpLoopback: true }), /HTTPS/);
+  });
+  it("validates base URLs at construction and normalizes safe bases", async () => {
+    for (const base of ["http://remote.example", "https://secret@host", "https://host?q=secret", "https://host/a/../b", "https://host:abc"]) {
+      assert.throws(() => new OpenArchiverClient(base, "key"), /OPENARCHIVER_BASE_URL/);
+    }
+    const recorded: Recorded[] = [];
+    await new OpenArchiverClient("https://host/", "key", stubFetch(jsonResponse({}), recorded)).search({ keywords: "x" });
+    assert.equal(new URL(recorded[0].url).pathname, "/api/v1/search");
+  });
+});
+
 describe("OpenArchiverClient.search", () => {
   it("builds the search URL and sends the API key header", async () => {
     const recorded: Recorded[] = [];

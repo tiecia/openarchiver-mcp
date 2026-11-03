@@ -1,5 +1,13 @@
 # openarchiver-mcp
 
+> **Security fork:** See [SECURITY-HARDENING.md](SECURITY-HARDENING.md) before use.
+> This branch adds transport, resource and temporary-file protections; attachment downloads
+> are disabled unless explicitly enabled. Build this fork from a reviewed commit with
+> `npm ci --ignore-scripts`; the upstream npm package and `npx` examples below do **not**
+> include this fork's changes. On the homelab, use Bitwarden + External Secrets Operator
+> for the API key, not a plaintext `.env` file. Upstream badges/compatibility claims below
+> describe the upstream project, not independent validation of this fork.
+
 [![npm version](https://img.shields.io/npm/v/openarchiver-mcp)](https://www.npmjs.com/package/openarchiver-mcp)
 [![CI](https://github.com/arnd/openarchiver-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/arnd/openarchiver-mcp/actions/workflows/ci.yml)
 [![MCP Badge](https://lobehub.com/badge/mcp/arnd-openarchiver-mcp)](https://lobehub.com/mcp/arnd-openarchiver-mcp)
@@ -108,6 +116,12 @@ The server reads two environment variables:
 | `OPENARCHIVER_BASE_URL` | yes | `https://openarchiver.example.com` (the `/api/v1` suffix is added automatically) |
 | `OPENARCHIVER_API_KEY` | yes | your API key |
 | `OPENARCHIVER_TIMEOUT_MS` | no | request timeout, default `30000` |
+| `OPENARCHIVER_ENABLE_ATTACHMENTS` | no | exactly `true` enables downloads; default disabled |
+| `OPENARCHIVER_ALLOW_HTTP_LOOPBACK` | no | exactly `true` permits canonical loopback HTTP for tests only; remote HTTP remains prohibited |
+
+HTTPS with normal certificate verification is required in production. Redirects are rejected.
+See [SECURITY-HARDENING.md](SECURITY-HARDENING.md) for fixed limits, temporary-file lifetime,
+and the distinction between read-only archive operations and local attachment copies.
 
 For local runs you can keep these in a `.env` file (see `.env.example`) and start the server with
 Node's built-in env-file support — no extra dependency required:

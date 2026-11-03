@@ -4,6 +4,8 @@ export interface OpenArchiverConfig {
   apiKey: string;
   /** Request timeout in milliseconds. */
   timeoutMs: number;
+  /** Test-only opt-in; never permits remote HTTP. */
+  allowHttpLoopback?: boolean;
 }
 
 /**
@@ -11,12 +13,29 @@ export interface OpenArchiverConfig {
  * - strips trailing slashes
  * - appends `/api/v1` unless an `/api/v<n>` suffix is already present
  */
-export function normalizeApiBase(baseUrl: string): string {
-  const trimmed = baseUrl.trim().replace(/\/+$/, "");
-  if (!trimmed) {
-    throw new Error("OPENARCHIVER_BASE_URL is empty");
+export function normalizeApiBase(baseUrl: string, allowHttpLoopback = false): string {
+  const trimmed = baseUrl.trim();
+  if (!trimmed) throw new Error("OPENARCHIVER_BASE_URL is empty");
+  const invalid = () => new Error("OPENARCHIVER_BASE_URL must be a safe HTTPS URL without credentials, query, or fragment.");
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    throw invalid();
   }
-  return /\/api\/v\d+$/.test(trimmed) ? trimmed : `${trimmed}/api/v1`;
+  const match = /^https?:\/\/([^/?#]+)([^?#]*)$/.exec(trimmed);
+  if (!match || /[\s\\]/.test(trimmed) || /[@]/.test(match[1]) || match[1].endsWith(":")) {
+    throw invalid();
+  }
+  const path = match[2].replace(/\/+$/, "");
+  const localHttp = allowHttpLoopback && url.protocol === "http:" &&
+    /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(match[1]);
+  if ((!localHttp && url.protocol !== "https:") || url.username || url.password || url.search || url.hash ||
+      path.split("/").slice(1).some(segment => !segment || segment === "." || segment === ".." || !/^[A-Za-z0-9._~-]+$/.test(segment))) {
+    throw invalid();
+  }
+  url.pathname = /\/api\/v\d+$/.test(path) ? path : `${path}/api/v1`;
+  return url.href;
 }
 
 /**
@@ -41,8 +60,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): OpenArchiverCo
   const timeoutMs = Number.parseInt(env.OPENARCHIVER_TIMEOUT_MS ?? "", 10);
 
   return {
-    apiBase: normalizeApiBase(baseUrl),
+    apiBase: normalizeApiBase(baseUrl, env.OPENARCHIVER_ALLOW_HTTP_LOOPBACK === "true"),
     apiKey,
     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 30_000,
+    ...(env.OPENARCHIVER_ALLOW_HTTP_LOOPBACK === "true" ? { allowHttpLoopback: true } : {}),
   };
 }
