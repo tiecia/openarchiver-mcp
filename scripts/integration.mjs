@@ -158,6 +158,9 @@ async function runMcpAssertions(apiKey) {
       ...process.env,
       OPENARCHIVER_BASE_URL: BASE_URL,
       OPENARCHIVER_API_KEY: apiKey,
+      // Test fixture only: production requires HTTPS and attachments stay off.
+      OPENARCHIVER_ALLOW_HTTP_LOOPBACK: "true",
+      OPENARCHIVER_ENABLE_ATTACHMENTS: "true",
     },
   });
   const client = new Client({ name: "integration-test", version: "0.0.0" });

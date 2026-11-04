@@ -1,3 +1,5 @@
+import { normalizeApiBase } from "./config.js";
+
 export type FetchLike = typeof fetch;
 
 export type MatchingStrategy = "last" | "all" | "frequency";
@@ -108,23 +110,76 @@ export function parseContentDispositionFilename(value: string | null): string | 
 
 const DEFAULT_NOT_FOUND = "Not found (404). The email id or storage path does not exist.";
 
-function mapStatusToMessage(status: number, body: string, notFound = DEFAULT_NOT_FOUND): string {
+function mapStatusToMessage(status: number, notFound = DEFAULT_NOT_FOUND): string {
   if (status === 401 || status === 403) {
     return `Authentication failed (${status}). Check OPENARCHIVER_API_KEY and that it has the required permissions (search:archive, read:archive).`;
   }
   if (status === 404) {
     return notFound;
   }
-  const detail = body.trim().slice(0, 300);
-  return `OpenArchiver request failed (${status})${detail ? `: ${detail}` : ""}`;
+  return `OpenArchiver request failed (${status}).`;
 }
 
-async function safeText(res: Response): Promise<string> {
-  try {
-    return await res.text();
-  } catch {
-    return "";
+const JSON_MAX_BYTES = 32 * 1024 * 1024;
+const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+
+async function readBounded(res: Response, maxBytes: number): Promise<Buffer> {
+  const length = res.headers.get("content-length");
+  if (length !== null && (!/^\d+$/.test(length) || !Number.isSafeInteger(Number(length)) || Number(length) > maxBytes)) {
+    await res.body?.cancel().catch(() => {});
+    throw new OpenArchiverError("Invalid or excessive Content-Length from OpenArchiver.");
   }
+  const reader = res.body?.getReader();
+  if (!reader) {
+    if (length !== null && Number(length) !== 0) {
+      throw new OpenArchiverError("Content-Length does not match the OpenArchiver response body.");
+    }
+    return Buffer.alloc(0);
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  // Fetch decodes compressed bodies; wire Content-Length is not the decoded size.
+  const encoding = res.headers.get("content-encoding");
+  const expectedLength = length !== null && (!encoding || encoding.toLowerCase() === "identity") ? Number(length) : undefined;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read().catch(() => {
+        throw new OpenArchiverError("Failed to read OpenArchiver response body.");
+      });
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) throw new OpenArchiverError(`Response exceeds the ${maxBytes} byte limit.`);
+      if (expectedLength !== undefined && size > expectedLength) {
+        throw new OpenArchiverError("Content-Length does not match the OpenArchiver response body.");
+      }
+      chunks.push(Buffer.from(value));
+    }
+    if (expectedLength !== undefined && size !== expectedLength) {
+      throw new OpenArchiverError("Content-Length does not match the OpenArchiver response body.");
+    }
+    return Buffer.concat(chunks, size);
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function readJson(res: Response): Promise<unknown> {
+  const bytes = await readBounded(res, JSON_MAX_BYTES);
+  try {
+    return JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new OpenArchiverError("Invalid JSON response from OpenArchiver.");
+  }
+}
+
+function encodeEmailId(id: string): string {
+  if (!id || /[%\\\u0000-\u001f\u007f\uD800-\uDFFF]/u.test(id) || id.split("/").some(part => part === "." || part === "..")) {
+    throw new OpenArchiverError("Invalid email id.");
+  }
+  return encodeURIComponent(id);
 }
 
 /** Thin client over the OpenArchiver REST API. `fetch` is injectable for testing. */
@@ -134,7 +189,10 @@ export class OpenArchiverClient {
     private readonly apiKey: string,
     private readonly fetchImpl: FetchLike = fetch,
     private readonly timeoutMs = 30_000,
-  ) {}
+    options: { allowHttpLoopback?: boolean } = {},
+  ) {
+    this.apiBase = normalizeApiBase(apiBase, options.allowHttpLoopback === true);
+  }
 
   async search(params: SearchParams): Promise<SearchResponse> {
     const query = new URLSearchParams();
@@ -143,23 +201,23 @@ export class OpenArchiverClient {
     if (params.limit != null) query.set("limit", String(params.limit));
     if (params.matchingStrategy) query.set("matchingStrategy", params.matchingStrategy);
     const res = await this.request(`/search?${query.toString()}`);
-    return (await res.json()) as SearchResponse;
+    return (await readJson(res)) as SearchResponse;
   }
 
   async getEmail(id: string): Promise<EmailDetail> {
     const res = await this.request(
-      `/archived-emails/${encodeURIComponent(id)}`,
+      `/archived-emails/${encodeEmailId(id)}`,
       "Not found (404). No archived email with this id.",
     );
-    return (await res.json()) as EmailDetail;
+    return (await readJson(res)) as EmailDetail;
   }
 
   async checkIntegrity(id: string): Promise<IntegrityCheckResult[]> {
     const res = await this.request(
-      `/integrity/${encodeURIComponent(id)}`,
+      `/integrity/${encodeEmailId(id)}`,
       "Not found (404). No archived email with this id.",
     );
-    const data = await res.json();
+    const data = await readJson(res);
     // The endpoint returns a bare array; anything else means the API changed under us,
     // and a clear error beats a downstream "results.filter is not a function".
     if (!Array.isArray(data)) {
@@ -170,7 +228,13 @@ export class OpenArchiverClient {
     return data as IntegrityCheckResult[];
   }
 
-  async download(path: string): Promise<DownloadResult> {
+  async download(path: string, maxBytes = ATTACHMENT_MAX_BYTES): Promise<DownloadResult> {
+    if (!path || /[%\\?#\u0000-\u001f\u007f\uD800-\uDFFF]/u.test(path) || path.split("/").some(part => !part || part === "." || part === "..")) {
+      throw new OpenArchiverError("Invalid storage path.");
+    }
+    if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > ATTACHMENT_MAX_BYTES) {
+      throw new OpenArchiverError(`maxBytes must be a safe positive integer no greater than ${ATTACHMENT_MAX_BYTES}.`);
+    }
     // Since OpenArchiver 0.6.0 the download endpoint ties the path back to an archived email
     // the key's role actually covers, and answers 404 (not 403) when it does not -- deliberately,
     // so a path cannot be probed. Without this hint a scoped key looks like a wrong path.
@@ -180,7 +244,7 @@ export class OpenArchiverClient {
         "email it belongs to (OpenArchiver 0.6.0+ checks the individual record and answers 404 " +
         "rather than 403). Re-check the storagePath from get_email, and the key's permissions.",
     );
-    const bytes = Buffer.from(await res.arrayBuffer());
+    const bytes = await readBounded(res, maxBytes);
     const filename =
       parseContentDispositionFilename(res.headers.get("content-disposition")) ??
       path.split("/").pop() ??
@@ -197,16 +261,17 @@ export class OpenArchiverClient {
     let res: Response;
     try {
       res = await this.fetchImpl(url, {
+        redirect: "error",
         headers: { "X-API-KEY": this.apiKey },
         signal: AbortSignal.timeout(this.timeoutMs),
       });
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      throw new OpenArchiverError(`Request to OpenArchiver failed: ${reason}`);
+    } catch {
+      throw new OpenArchiverError("Request to OpenArchiver failed. Check connectivity and request timeout.");
     }
     if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
       throw new OpenArchiverError(
-        mapStatusToMessage(res.status, await safeText(res), notFound),
+        mapStatusToMessage(res.status, notFound),
         res.status,
       );
     }

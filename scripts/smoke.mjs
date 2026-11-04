@@ -21,6 +21,8 @@ const PKG_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.me
 const env = { ...process.env };
 delete env.OPENARCHIVER_BASE_URL;
 delete env.OPENARCHIVER_API_KEY;
+delete env.OPENARCHIVER_ENABLE_ATTACHMENTS;
+delete env.OPENARCHIVER_ALLOW_HTTP_LOOPBACK;
 
 const transport = new StdioClientTransport({
   command: process.execPath,
@@ -44,8 +46,12 @@ try {
       `serverInfo.version is ${serverInfo?.version}, expected ${PKG_VERSION} (from package.json)`,
     );
   }
+  const disabled = await client.callTool({ name: "get_attachment", arguments: { path: "smoke-fixture" } });
+  if (!disabled.isError || !disabled.content?.some((part) => part.type === "text" && /Attachments are disabled/.test(part.text))) {
+    throw new Error("attachments were not disabled by default");
+  }
   console.log(
-    `smoke ok: server ${serverInfo.name} v${serverInfo.version} exposes [${names.join(", ")}]`,
+    `smoke ok: server ${serverInfo.name} v${serverInfo.version} exposes [${names.join(", ")}]; attachments disabled`,
   );
 } finally {
   await client.close();
