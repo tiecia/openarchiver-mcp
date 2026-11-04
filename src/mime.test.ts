@@ -4,7 +4,26 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
-import { parseMime } from "./mime.js";
+import { parseMime, type MimeParseOptions } from "./mime.js";
+
+async function headers(raw: Uint8Array, options?: MimeParseOptions): Promise<{ headers: { name: string; value: string }[]; truncated: boolean }> {
+  const module = await import("./mime.js") as unknown as { parseHeaders: (raw: Uint8Array, options?: MimeParseOptions) => Promise<{ headers: { name: string; value: string }[]; truncated: boolean }> };
+  assert.equal(typeof module.parseHeaders, "function", "headers parser must be exported separately");
+  return module.parseHeaders(raw, options);
+}
+
+test("isolated headers preserve original order, duplicates and unfolded values without body or attachment bytes", async () => {
+  const raw = Buffer.from('Received: literal first\r\nReceived: literal second\r\nTo: a@example.test,\r\n\tb@example.test\r\nX-Hostile: <script>do not execute</script> https://invalid.test\r\n\r\nbody-secret attachment-secret');
+  assert.deepEqual(await headers(raw), {
+    headers: [
+      { name: "Received", value: "literal first" },
+      { name: "Received", value: "literal second" },
+      { name: "To", value: "a@example.test, b@example.test" },
+      { name: "X-Hostile", value: "<script>do not execute</script> https://invalid.test" },
+    ],
+    truncated: false,
+  });
+});
 test("isolated MIME parsing returns only the text body, never parsed headers or attachments", async () => {
   const raw = Buffer.from([
     'Subject: private subject',
@@ -39,6 +58,112 @@ test("worker returns a visibly truncated body within 64000 characters", async ()
   const result = await parseMime(Buffer.from("Content-Type: text/plain\r\n\r\n" + "x".repeat(100_000)));
   assert.equal(result.body.length, 64_000);
   assert.match(result.body, /\[TRUNCATED:.*\]$/);
+});
+
+test("headers scanner bounds count and bytes with explicit truncation, rejecting giant malformed lines", async () => {
+  const countLimited = await headers(Buffer.from(Array.from({ length: 201 }, (_, i) => `X-${i}: value`).join("\r\n") + "\r\n\r\nsecret"));
+  assert.equal(countLimited.headers.length, 200);
+  assert.equal(countLimited.truncated, true);
+  const byteLimited = await headers(Buffer.from(Array.from({ length: 50 }, (_, i) => `X-${i}: ${"x".repeat(1000)}`).join("\r\n") + "\r\n\r\nsecret"));
+  assert.equal(byteLimited.truncated, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(byteLimited)) < 34_000);
+  for (const malformed of ["x".repeat(100_000), "X: " + "x".repeat(8193), " continuation\r\n", "Bad Name: x\r\n", "X: a\rb\r\n", "X: a\u0000b\r\n", "N".repeat(129) + ": x\r\n", "X: " + ("x\r\n ").repeat(5000)]) {
+    await assert.rejects(headers(Buffer.from(malformed)), /^Error: Email parsing failed\.$/);
+  }
+  assert.deepEqual(await headers(Buffer.from("X: one\nX: two\n\nprivate")), { headers: [{ name: "X", value: "one" }, { name: "X", value: "two" }], truncated: false });
+});
+
+test("headers preserve non-ASCII whitespace and encoded words as literal untrusted values", async () => {
+  assert.deepEqual(await headers(Buffer.from("Subject: =?UTF-8?Q?literal?=\r\nX-Unicode: \u00a0data\u00a0\t\r\n \u00a0fold\u00a0\r\n\r\nbody")), {
+    headers: [
+      { name: "Subject", value: "=?UTF-8?Q?literal?=" },
+      { name: "X-Unicode", value: "\u00a0data\u00a0 \u00a0fold\u00a0" },
+    ], truncated: false,
+  });
+});
+
+test("headers reject invalid UTF8 bytes instead of replacing supposedly literal values", async () => {
+  for (const invalid of [Buffer.from([0xe9]), Buffer.from([0xc0, 0xaf]), Buffer.from([0xed, 0xa0, 0x80]), Buffer.from([0xf4, 0x90, 0x80, 0x80])]) {
+    const raw = Buffer.concat([Buffer.from("X-Secret: UTF8_SECRET "), invalid, Buffer.from("\r\n\r\nbody-secret")]);
+    await assert.rejects(headers(raw), /^Error: Email parsing failed\.$/);
+  }
+  // Valid non-ASCII header values remain literal, and body bytes are not decoded.
+  assert.deepEqual(await headers(Buffer.concat([Buffer.from("X-Unicode: café\r\n\r\n"), Buffer.from([0xe9])])), {
+    headers: [{ name: "X-Unicode", value: "café" }], truncated: false,
+  });
+});
+
+test("headers worker replies reject extra fields, malformed entries and every output budget violation", async () => {
+  for (const reply of [
+    { headers: [], truncated: false, body: "secret" },
+    { headers: [], truncated: "false" },
+    { headers: [{ name: "X", value: "v", attachments: ["secret"] }], truncated: false },
+    { headers: [{ name: "Bad Name", value: "v" }], truncated: false },
+    { headers: [{ name: "Bad:Name", value: "v" }], truncated: false },
+    { headers: [{ name: "N".repeat(129), value: "v" }], truncated: false },
+    { headers: [{ name: "X", value: 123 }], truncated: false },
+    { headers: [{ name: "X", value: "a\r\nb" }], truncated: false },
+    { headers: [{ name: "X", value: "x".repeat(4097) }], truncated: false },
+    { headers: Array.from({ length: 201 }, () => ({ name: "X", value: "v" })), truncated: false },
+    { headers: Array.from({ length: 10 }, () => ({ name: "X", value: "x".repeat(4000) })), truncated: false },
+    { headers: Array.from({ length: 10 }, () => ({ name: "X", value: "界".repeat(1300) })), truncated: false },
+    { headers: [null], truncated: false }, null, { body: "secret" },
+  ]) {
+    const workerUrl = fixtureWorker(`import { parentPort } from 'node:worker_threads'; parentPort.postMessage(${JSON.stringify(reply)});`);
+    await assert.rejects(headers(Buffer.alloc(0), { workerUrl }), /^Error: Email parsing failed\.$/);
+  }
+  const workerUrl = fixtureWorker("import { parentPort } from 'node:worker_threads'; parentPort.postMessage(Object.assign([], { headers: [], truncated: false }));");
+  await assert.rejects(headers(Buffer.alloc(0), { workerUrl }), /^Error: Email parsing failed\.$/);
+});
+
+test("headers deadline and shutdown terminate actual CPU-loop workers before settling", async () => {
+  const workerUrl = fixtureWorker(`
+    import { workerData } from 'node:worker_threads';
+    if (workerData.mode !== 'headers') throw new Error('wrong mode');
+    const state = new Int32Array(workerData.raw.buffer);
+    Atomics.store(state, 0, 1);
+    while (true) Atomics.add(state, 1, 1);
+  `);
+  for (const shutdown of [false, true]) {
+    const state = new Int32Array(new SharedArrayBuffer(8));
+    const controller = new AbortController();
+    const started = performance.now();
+    const pending = headers(new Uint8Array(state.buffer), { workerUrl, signal: controller.signal, ...(shutdown ? {} : { timeoutMs: 500 }) });
+    const rejected = assert.rejects(pending, /^Error: Email parsing failed\.$/);
+    if (shutdown) {
+      while (Atomics.load(state, 0) === 0) {
+        assert.ok(performance.now() - started < 2000, "headers loop must start");
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      const abortAt = performance.now();
+      controller.abort(new Error("private reason"));
+      await rejected;
+      assert.ok(performance.now() - abortAt < 500);
+    } else {
+      await rejected;
+      assert.ok(performance.now() - started < 1500);
+    }
+    assert.equal(Atomics.load(state, 0), 1);
+    const stopped = Atomics.load(state, 1);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(Atomics.load(state, 1), stopped);
+  }
+});
+
+test("headers use bounded V8 resources and reject pre-aborted work without starting a worker", async () => {
+  const workerUrl = fixtureWorker(`
+    import { parentPort, resourceLimits } from 'node:worker_threads';
+    parentPort.postMessage({ headers: [{ name: 'X-Limits', value: JSON.stringify(resourceLimits) }], truncated: false });
+  `);
+  const parsed = await headers(Buffer.alloc(0), { workerUrl });
+  const limits = JSON.parse(parsed.headers[0].value);
+  assert.equal(limits.maxOldGenerationSizeMb, 128);
+  assert.equal(limits.maxYoungGenerationSizeMb, 16);
+  assert.equal(limits.stackSizeMb, 4);
+  const state = new Int32Array(new SharedArrayBuffer(4));
+  const markStarted = fixtureWorker(`import { workerData } from 'node:worker_threads'; Atomics.store(new Int32Array(workerData.raw.buffer), 0, 1);`);
+  await assert.rejects(headers(new Uint8Array(state.buffer), { workerUrl: markStarted, signal: AbortSignal.abort() }), /^Error: Email parsing failed\.$/);
+  assert.equal(Atomics.load(state, 0), 0);
 });
 
 function fixtureWorker(source: string): URL {

@@ -1,203 +1,149 @@
 # openarchiver-mcp
 
-[![npm version](https://img.shields.io/npm/v/openarchiver-mcp)](https://www.npmjs.com/package/openarchiver-mcp)
-[![CI](https://github.com/arnd/openarchiver-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/arnd/openarchiver-mcp/actions/workflows/ci.yml)
-[![MCP Badge](https://lobehub.com/badge/mcp/arnd-openarchiver-mcp)](https://lobehub.com/mcp/arnd-openarchiver-mcp)
+An unofficial, read-only [MCP](https://modelcontextprotocol.io) server for searching and reading an [OpenArchiver](https://openarchiver.com) email archive. This fork builds on [arnd/openarchiver-mcp](https://github.com/arnd/openarchiver-mcp); it is not affiliated with or supported by OpenArchiver / LogicLabs.
 
-An [MCP](https://modelcontextprotocol.io) server that lets an AI assistant (Claude Code, Claude
-Desktop, …) search and read your [OpenArchiver](https://openarchiver.com) email archive.
+## Requirements and installation
 
-> ⚠️ **Unofficial.** Independent, community-maintained project — not affiliated with, endorsed by,
-> or supported by OpenArchiver / LogicLabs. The "OpenArchiver" name is used only to describe
-> compatibility. Please report issues [here](https://github.com/arnd/openarchiver-mcp/issues), not
-> to the OpenArchiver project.
+- Node.js **26 or newer**.
+- OpenArchiver API v1. Advanced queries target **OpenArchiver 0.6.2**; older servers may reject unsupported filters. The wrapper does not silently fall back to an unfiltered query.
+- A dedicated API identity with **`search:archive` and `read:archive`**, scoped to the intended messages. No administrator permissions are required by these tools.
 
-It is a thin, typed wrapper around the OpenArchiver REST API and exposes four tools:
-
-| Tool | What it does |
-|------|--------------|
-| `search_archive` | Full-text search across archived emails (subject, body, **and extracted attachment text**). Returns compact hits, each with an `id`. |
-| `get_email` | Fetch one email by id: metadata, full body, and an attachment list (each with a `storagePath`). |
-| `check_integrity` | Re-compute the SHA-256 hashes of an archived email and its attachments and compare them against the hashes stored at archival time — proof that a message has not been altered or corrupted in storage. |
-| `get_attachment` | Download an attachment by its `storagePath`. Default returns it inline (text → text, images → image content, other binaries → base64). With `mode: "file"` it saves the bytes to a server-managed temp file and returns only the path — handy for large binaries to keep base64 out of the context (path only usable when the server runs locally; the server picks the path, callers can't). |
-
-All operations are **read-only**.
-
-## Requirements
-
-- **Node.js ≥ 26**
-- An OpenArchiver instance and an **API key** with the permissions `search:archive` and `read:archive`
-  (create one in OpenArchiver under *Settings → API keys*, or via `POST /api/v1/api-keys`).
-
-> **OpenArchiver compatibility:** developed and tested against **OpenArchiver 0.6.0** (REST API `v1`),
-> and tested in CI against 0.6.0, 0.5.2 and the current upstream `main` snapshot. OpenArchiver has no
-> stable public OpenAPI spec yet, so other versions may differ; 0.5.2 or newer is recommended.
-
-## Install
-
-The published package runs directly with `npx` — no checkout or build needed:
+Build this fork from source or use its runtime release bundle. The upstream npm package does not automatically include this fork's changes.
 
 ```bash
-npx -y openarchiver-mcp
+npm ci --ignore-scripts
+npm run build
+npm test
+npm run smoke
+node dist/index.js --help
 ```
 
-(It's normally launched by your MCP client, not by hand — see below.)
+Configure your MCP client to launch `node /absolute/path/to/openarchiver-mcp/dist/index.js`, or the extracted bundle's entrypoint. Supply credentials through your client's supported secret/environment mechanism, not tool arguments. Never commit credentials.
 
-Two flags work without an MCP client, which is handy when you need to tell someone which build you
-are actually running:
+| Environment variable | Purpose |
+|---|---|
+| `OPENARCHIVER_BASE_URL` | Required HTTPS instance URL, e.g. `https://archive.example.com`; `/api/v1` is added automatically. |
+| `OPENARCHIVER_API_KEY` | Required for tool execution; not required for discovery. |
+| `OPENARCHIVER_TIMEOUT_MS` | Request timeout; default 30000 ms. |
+| `OPENARCHIVER_ENABLE_ATTACHMENTS` | Only exact lowercase `true` enables attachment downloads; default disabled. |
+| `OPENARCHIVER_ENABLE_RAW_EXPORT` | Only exact lowercase `true`, **together with attachments enabled**, permits raw `.eml` exports and legacy path-only generic stored-file downloads; default disabled. |
+| `OPENARCHIVER_ALLOW_HTTP_LOOPBACK` | Test-only explicit loopback HTTP allowance; never permits remote HTTP. |
 
-```bash
-npx -y openarchiver-mcp --version   # prints e.g. 1.3.0
-npx -y openarchiver-mcp --help      # usage, environment variables, tool list
-```
+HTTPS certificate verification is mandatory for remote archives. Redirects are rejected. These settings cannot be changed through tool arguments.
 
-The same version is reported to the client in the MCP `initialize` handshake (`serverInfo`), so it
-also shows up in e.g. Claude Code's `/mcp` view and the MCP Inspector.
+## Eight focused tools
 
-### From source
+| Tool | Use |
+|---|---|
+| `search_archive` | Keyword or filter-only index queries with compact summaries, indexed text or match details. |
+| `list_archive` | Database-backed, paginated message summaries for one source/merged group, independently of indexing. |
+| `suggest_archive_values` | Permission-scoped sender/mailbox suggestions for constructing queries; not an exhaustive directory. |
+| `get_email` | Read one body or inspect metadata, with source/mailbox identity and archival state. |
+| `get_email_thread` | Bounded conversation traversal; each returned member is individually authorized before inclusion. |
+| `get_email_source` | Inspect original ordered headers, or explicitly gated export of the original `.eml`. |
+| `check_integrity` | Verify email/attachment hashes; optional passing-item hashes. |
+| `get_attachment` | Existing default-denied attachment downloads, inline or private temporary file. |
 
-```bash
-npm install
-npm run build             # compiles TypeScript to dist/
-npm test                  # builds and runs the unit tests
-npm run smoke             # launches the built server and verifies it speaks MCP (tools/list)
-npm run test:integration  # full end-to-end test against a real OpenArchiver (needs Docker)
-```
+Existing `search_archive({"keywords":"invoice"})`, `get_email({"id":"..."})` and integrity calls remain supported. Attachment callers must now supply `emailId` unless the operator explicitly enables generic stored-file export as described below. Tools do not change messages, send mail, administer sources or manage accounts. Read operations can generate the backend's normal audit records.
 
-> `npm run smoke` needs no OpenArchiver instance: it uses dummy credentials and only lists tools,
-> which never calls the API.
+### Search and discovery
 
-### Integration test
+`search_archive` accepts the existing `keywords`, `page`, `limit`, `matchingStrategy` and adds:
 
-`npm run test:integration` (`scripts/integration.mjs`) is a full end-to-end check. It spins up a
-**throwaway OpenArchiver stack** via `docker compose` (`test/integration/`), auto-creates an admin and
-API key, imports a small fixture mbox through the local-file (mbox) connector, then drives the built
-MCP server over stdio against that live instance and asserts `search_archive`, `get_email`,
-`check_integrity` and `get_attachment` all work. The stack is torn down (`docker compose down -v`) afterwards, so no state
-persists and no real secrets are involved.
+- `filters`: `dateFrom`, `dateTo`, `sources`, `excludeSources`, `from`, `notFrom`, `to`, `notTo`, `mailboxes`, `hasAttachments`.
+- `searchIn`: any of `subject`, `body`, `attachment_name`, `attachment_content`, `from`, `to`.
+- `sort`: `date_desc`, `date_asc`, `relevance`.
+- `detail`: `summary` (default), `indexed_text`, `matches`.
 
-> Requires **Docker** and **`docker compose` v2**. It pulls the OpenArchiver stack images
-> and waits for the asynchronous import/indexing, so a run takes a few minutes. It is not part of
-> the fast unit CI — it runs nightly / on demand via the `Integration` workflow.
-
-By default it tests against OpenArchiver **v0.6.0**. To test another version, set `OA_IMAGE_TAG`
-(or pass it as an argument):
-
-```bash
-OA_IMAGE_TAG=v0.5.2 npm run test:integration
-npm run test:integration -- v0.5.2          # equivalent
-
-# test several versions in sequence:
-for v in v0.6.0 v0.5.2; do OA_IMAGE_TAG=$v npm run test:integration || break; done
-```
-
-> Only OSS semver tags (`v0.1.1` … `v0.6.0`) are freely pullable. The `v1.x` releases are published
-> only as `-enterprise` images (e.g. `OA_IMAGE_TAG=v1.4.2-enterprise`), which require a license and
-> may bootstrap differently. The CI `Integration` workflow runs a matrix over `v0.6.0`, `v0.5.2` and
-> one pre-release snapshot of upstream `main` (non-blocking: it reports but cannot fail the
-> workflow). The versions live in [`.github/oa-snapshot.json`](.github/oa-snapshot.json); the weekly
-> `Snapshot check` workflow re-pins the snapshot by PR when upstream publishes a newer one.
-> Each run uses host port 3000, so local runs must be sequential (the loop above), not parallel.
-
-## Configuration
-
-The server reads two environment variables:
-
-| Variable | Required | Example |
-|----------|----------|---------|
-| `OPENARCHIVER_BASE_URL` | yes | `https://openarchiver.example.com` (the `/api/v1` suffix is added automatically) |
-| `OPENARCHIVER_API_KEY` | yes | your API key |
-| `OPENARCHIVER_TIMEOUT_MS` | no | request timeout, default `30000` |
-| `OPENARCHIVER_ENABLE_ATTACHMENTS` | no | exactly `true` enables downloads; default disabled |
-| `OPENARCHIVER_ALLOW_HTTP_LOOPBACK` | no | exactly `true` permits canonical loopback HTTP for tests only; remote HTTP remains prohibited |
-
-HTTPS with normal certificate verification is required in production. Redirects are rejected.
-See [SECURITY-HARDENING.md](SECURITY-HARDENING.md) for fixed limits, temporary-file lifetime,
-and the distinction between read-only archive operations and local attachment copies.
-
-For local runs you can keep these in a `.env` file (see `.env.example`) and start the server with
-Node's built-in env-file support — no extra dependency required:
-
-```bash
-cp .env.example .env   # then fill in your values
-node --env-file=.env dist/index.js
-```
-
-> The `.env` file is git-ignored. Never commit your API key.
-
-## Use with Claude Code
-
-```bash
-claude mcp add openarchiver \
-  --env OPENARCHIVER_BASE_URL=https://openarchiver.example.com \
-  --env OPENARCHIVER_API_KEY=your-api-key \
-  -- npx -y openarchiver-mcp
-```
-
-## Use with Kiro CLI
-
-```bash
-kiro-cli mcp add \
-  --name openarchiver \
-  --command npx \
-  --args "-y openarchiver-mcp" \
-  --env OPENARCHIVER_BASE_URL=https://openarchiver.example.com \
-  --env OPENARCHIVER_API_KEY=your-api-key
-```
-
-## Use with Claude Desktop
-
-Add to `claude_desktop_config.json`:
+Address/source criteria are arrays, not comma-separated input strings. Address criteria support exact addresses, `*@domain` and `name@*`. Different filters are combined with AND; alternatives within an inclusion list use OR. Recipient filters span To, Cc and Bcc. Mailboxes identify the owner account the email was archived from. A keyword is optional only when a real filtering criterion is supplied; sorting and field selection alone are not filters. Default page size is 10, maximum 100. All strings, lists and URLs have fixed server-side bounds.
 
 ```json
 {
-  "mcpServers": {
-    "openarchiver": {
-      "command": "npx",
-      "args": ["-y", "openarchiver-mcp"],
-      "env": {
-        "OPENARCHIVER_BASE_URL": "https://openarchiver.example.com",
-        "OPENARCHIVER_API_KEY": "your-api-key"
-      }
-    }
-  }
+  "filters": {
+    "dateFrom": "2026-11-01",
+    "dateTo": "2026-11-04",
+    "mailboxes": ["reader@example.com"],
+    "notFrom": ["*@promotions.example"],
+    "hasAttachments": false
+  },
+  "sort": "date_desc",
+  "limit": 20
 }
 ```
 
-> Running from a local checkout instead? Replace the command with
-> `node /absolute/path/to/openarchiver-mcp/dist/index.js`.
+Find filter values with `suggest_archive_values({"field":"mailboxes","query":"example"})` or `field:"from"`. Values are permission-scoped suggestions, not an assertion that every mailbox or sender has been enumerated.
 
-## Inspect / debug
+**Count and time semantics matter:** search is asynchronously indexed; totals are estimates, subject to the search engine's configured hit window. Date boundaries are inclusive UTC calendar days on **sent timestamps**, not provider-received times. Message archive time is a separate field. These tools do not invent an exact local-day received-email count or silently scan the archive to manufacture one.
 
-Run the official MCP Inspector against the built server:
+### Browse source rows
 
-```bash
-npx @modelcontextprotocol/inspector node --env-file=.env dist/index.js
+```json
+{"ingestionSourceId":"00000000-0000-4000-8000-000000000001","page":1,"limit":20}
 ```
 
-## How it works
+`list_archive` does not require a keyword and can list rows missing from the search index. `totalRows` is the backend's permission-filtered database count for the source's merged group at request time. It counts stored rows, not deduplicated provider deliveries, and is not a transactionally stable snapshot across pages. This endpoint has no date/sort query options. Source identifiers can come from authorized search hits or message metadata; the wrapper does not ask for administrative source-list permission.
 
-- `src/config.ts` — reads and validates env vars; normalizes the base URL to `…/api/v1`.
-- `src/client.ts` — `OpenArchiverClient` (`search`, `getEmail`, `checkIntegrity`, `download`); `fetch` is injectable for
-  testing; maps HTTP errors (401/403/404/…) to actionable messages.
-- `src/format.ts` — pure functions that render API responses into compact text for the model.
-- `src/index.ts` — registers the four MCP tools and serves them over stdio. `get_email` parses the
-  raw RFC822 message (returned by the API) with [`mailparser`](https://nodemailer.com/extras/mailparser/)
-  to produce a readable body.
+### Message metadata and conversations
 
-Tests live next to the code (`*.test.ts`) and run on Node's built-in test runner (`node:test`) — no
-network access required (the HTTP layer is mocked).
+`get_email` defaults to body mode; `view:"metadata"` skips MIME parsing. Structured metadata can include source ID/name, mailbox owner, sent/archive times, provider/thread identifiers, indexing state/attempts, legal-hold/journaling flags, stored message hash/path and attachment IDs. Flattened backend recipients are labeled as recipients; the wrapper does not claim they were all in the To header. Metadata mode still fetches the backend's detail response, so HTTP limits apply even when raw MIME is not parsed or returned.
 
-## Notes & limitations
+`get_email_thread` supports only complete backend candidate sets of **at most 20 unique message IDs**; larger sets fail closed with a generic error, never a partial positional scan. Raw candidate lists are also bounded to 1000 rows and 128000 bytes before deduplication. Every request, including each continuation, starts from a readable seed and independently checks every candidate through the record-authorized message endpoint (the seed detail may be reused): at most **21 record reads**, with no cached authorization snapshot. Embedded candidate subjects, senders and dates are never trusted. Only authorized details are sorted chronologically by sent time (ID breaks ties), then paginated with `limit` from 1 to 20. Scoped 403/404 records are silently omitted before pagination, so they create no hidden slots, counts or dummy pages; `pagination.more` and `nextCursor` describe only the authorized list. Cursors are encrypted, seed-bound and expire after 15 minutes or a server restart. Permissions or thread changes can shift pages. No member bodies are parsed or attachments downloaded. This bounded candidate-set view is not a claim of exact, unrestricted thread completeness or a stable snapshot.
 
-- OpenArchiver does not publish an official client SDK or a hosted OpenAPI spec, so this server talks to
-  the REST endpoints directly.
-- The storage download endpoint returns `application/octet-stream` for attachments, so `get_attachment`
-  returns most binaries (e.g. PDFs) as base64. For **reading** PDF/Office content, prefer
-  `search_archive` / `get_email`, which expose the server-side extracted text.
-- Meilisearch caps `total` at 1000 by default; use `page`/`limit` to paginate.
-- Since OpenArchiver **0.6.0**, permissions are enforced per record: the download endpoint checks that
-  the requested path belongs to an email the API key's role actually covers, and answers `404` (not
-  `403`) when it does not, so a path cannot be probed. With a scoped key, `get_attachment` can
-  therefore report "not found" for a path that exists. A key with unrestricted `read:archive` is
-  unaffected.
+### Original headers and optional raw export
+
+`get_email_source({"id":"...","view":"headers"})` inspects the original header section in an interruptible worker. Repeated headers and their order are preserved, continuation lines are unfolded, and header counts/bytes are bounded. Header values, including `Received`, are untrusted evidence—not a guaranteed canonical provider-received timestamp. HTML is not rendered and remote resources are never fetched.
+
+`view:"raw_file"` requires both `OPENARCHIVER_ENABLE_RAW_EXPORT=true` and `OPENARCHIVER_ENABLE_ATTACHMENTS=true` **before any fetch/export**. Raw messages may embed attachment bytes; enabling raw export alone must not bypass disabled attachments. This view writes the original bytes only to a server-owned temporary `.eml`, never inline base64 or a caller-selected path. Returned paths work only for a local stdio server and expire.
+
+`check_integrity({"id":"...","includeHashes":true})` includes stored/computed hashes for passing items too; the default remains compact.
+
+### Attachment downloads and compatibility
+
+Enable `OPENARCHIVER_ENABLE_ATTACHMENTS=true` only when downloads are intended. Leave raw export disabled for attachment-only access, and use a path from the selected message's `attachments` list:
+
+```json
+{"emailId":"...","path":"open-archiver/.../attachments/forwarded.eml","mode":"file"}
+```
+
+`get_attachment` fetches the record-authorized message detail on **every call**, verifies that the returned message ID matches `emailId`, and requires an exact `attachments[].storagePath` match. The message's original `storagePath` is rejected even if duplicated in attachment metadata. Filenames, extensions and MIME types do not establish association: a verified attached `.eml` is allowed, while an original message named `.png` is not. Unavailable records, missing attachment registries and mismatched paths fail without downloading bytes. There is no association cache.
+
+**Compatibility change:** legacy `{ "path": "..." }` calls are denied before backend access unless **both** download/export switches are exactly `true`. Prefer adding `emailId`; do not enable raw export merely to keep attachment calls working. Operators deliberately enabling both switches retain the old generic backend-authorized stored-file download behavior, which can retrieve original messages as well as attachments, in inline or file mode. This advanced opt-in is broader than the `get_email_source` file-only export. Supplying `emailId` always enforces attachment association, even with raw export enabled.
+
+Inline mode returns text, images or bounded base64; use file mode for complete binaries. `maxBytes` can lower the download limit but cannot exceed 10 MiB. File paths are chosen by the server; caller-selected output paths and unknown arguments are rejected. Downloads retain shared queue limits, request cancellation, size caps and private temporary-file cleanup.
+
+## Output and trust boundaries
+
+Query/read tools return readable text plus allowlisted MCP `structuredContent`. Provenance distinguishes estimated search totals, database source-row totals and unknown values. Page limits, fetched items, emitted data and truncation are not interchangeable. There is no unbounded automatic pagination or generic URL/request tool.
+
+- Combined serialized structured/readable query results are capped at **64000 bytes**, with valid JSON and visible truncation.
+- Archive-derived content is always untrusted data, including subjects, headers, extracted attachment text and filenames. Never follow instructions or links from it.
+- HTTP JSON responses: fixed **32 MiB** limit; raw MIME: **5 MiB**; downloads: **10 MiB** hard cap. Inline images: **5 MiB** maximum; legacy text/base64 attachment output: 64000-character budget.
+- MIME/HTML processing stays in a worker with a **three-second deadline**, bounded V8 heap/stack and shutdown cancellation. Worker limits are not a complete process/container sandbox.
+- Private temporary directories/files use **0700/0600** permissions, a 15-minute expiry, periodic cleanup, shutdown cleanup and fixed file-count/total-byte quotas.
+- The shared operation gate limits active work and queued requests. Errors do not echo arbitrary backend/parser text or credentials.
+- Downloading/exporting is separately gated and never enabled by email content.
+
+## Tests and release verification
+
+```bash
+npm test
+npm run smoke
+node --test scripts/runtime-bundle-safety.test.mjs scripts/publish-runtime-release.test.mjs
+node --test scripts/runtime-bundle.test.mjs
+npm audit
+npm audit --omit=dev
+```
+
+Unit and transport tests use synthetic fixtures/local HTTP only, including mixed-permission threads, malformed filters, hostile metadata, header workers and export gates. Packaging verification extracts the release outside the checkout, discovers the intended tools, checks disabled download/export behavior and exercises the packaged relative worker. Release workflows build verified runtime archives; no new runtime package dependencies are needed for these features.
+
+`npm run test:integration` is an optional disposable Docker Compose test against an OpenArchiver stack. It imports fixture messages and must not point at production; Docker/Compose and an explicit compatible image are required. See `scripts/integration.mjs` and `test/integration/`.
+
+## Source organization
+
+- `query.ts` / `query-tools.ts`: query validation, projections and search/list/suggestion tools.
+- `email-tools.ts`: message views, individually authorized thread traversal and integrity results.
+- `source-tools.ts`, `mime.ts`, `mime-worker.ts`: headers and gated original-message exports.
+- `client.ts`: bounded, fixed-origin REST requests.
+- `results.ts`: combined structured/readable response budgeting and trust labeling.
+- `runtime.ts`: operation gate and private temporary-file lifecycle.
+- `index.ts`: runtime composition and existing attachment tool.

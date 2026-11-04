@@ -28,15 +28,21 @@ export async function verifyRuntime(root) {
       args: [join(root, "dist/index.js")], cwd: elsewhere, env }));
     assert.equal(client.getServerVersion()?.version, pkg.version);
     assert.deepEqual((await client.listTools()).tools.map(({ name }) => name).sort(),
-      ["check_integrity", "get_attachment", "get_email", "search_archive"]);
+      ["check_integrity", "get_attachment", "get_email", "get_email_source", "get_email_thread", "list_archive", "search_archive", "suggest_archive_values"]);
     const disabled = await client.callTool({ name: "get_attachment", arguments: { path: "bundle-smoke" } });
     assert.ok(disabled.isError && disabled.content.some((part) => part.type === "text" && /Attachments are disabled/.test(part.text)));
-    console.log(`MCP smoke ok: extracted runtime v${pkg.version}; tools/list; attachments disabled`);
+    const rawDisabled = await client.callTool({ name: "get_email_source", arguments: { id: "00000000-0000-4000-8000-000000000001", view: "raw_file" } });
+    assert.ok(rawDisabled.isError && rawDisabled.content.some(part => part.type === "text" && /disabled/.test(part.text)));
+    console.log(`MCP smoke ok: extracted runtime v${pkg.version}; tools/list; attachments disabled; raw export disabled`);
     // Importing from the extracted path also resolves its production relative worker.
-    const { parseMime } = await import(pathToFileURL(join(root, "dist/mime.js")));
+    const { parseMime, parseHeaders } = await import(pathToFileURL(join(root, "dist/mime.js")));
     const parsed = await parseMime(Buffer.from("Content-Type: text/html; charset=utf-8\r\n\r\n<p>bundle worker fixture</p>"));
     assert.equal(parsed.body.trim(), "bundle worker fixture");
     console.log("relative MIME worker ok: extracted mailparser + HTML conversion");
+    const headers = await parseHeaders(Buffer.from("Received: first\r\nReceived: second\r\nSubject: headers fixture\r\n\r\nbody excluded"));
+    assert.equal(headers.headers.filter(header => header.name.toLowerCase() === "received").length, 2);
+    assert.ok(!JSON.stringify(headers).includes("body excluded"));
+    console.log("relative headers worker ok: extracted ordered duplicate headers");
   } finally {
     await client.close();
     rmSync(elsewhere, { recursive: true, force: true });

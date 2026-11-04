@@ -1,5 +1,85 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { createServer } from "node:http";
+import { once } from "node:events";
+
+async function withApi(body: unknown, run: (client: OpenArchiverClient, requests: URL[]) => Promise<void>, status = 200): Promise<void> {
+  const requests: URL[] = [];
+  const server = createServer((req, res) => {
+    requests.push(new URL(req.url!, "http://localhost"));
+    assert.equal(req.headers["x-api-key"], "fixture-key");
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify(body));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as { port: number };
+  try {
+    await run(new OpenArchiverClient(`http://127.0.0.1:${address.port}`, "fixture-key", fetch, 1000, { allowHttpLoopback: true }), requests);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+}
+
+it("new read endpoints reject malformed payloads without leaking upstream fields", async () => {
+  const source = "12345678-1234-1234-1234-123456789abc";
+  for (const payload of [null, [], {}, { items: {} }, { items: [null] }, { items: [{ id: 1 }] }]) {
+    await withApi(payload, async client => { await assert.rejects(client.listArchive({ ingestionSourceId: source }), /Unexpected.*listing/); });
+  }
+  for (const payload of [null, [], {}, { values: {} }, { values: [null] }, { values: [1] }]) {
+    await withApi(payload, async client => { await assert.rejects(client.suggestValues({ field: "from" }), /Unexpected.*facets/); });
+  }
+  await withApi({ items: [{ id: "one", ingestionSource: { id: source, name: "name", credentials: "DO-NOT-LEAK" }, raw: "DO-NOT-LEAK" }], total: "bogus" }, async client => {
+    const data = await client.listArchive({ ingestionSourceId: source });
+    assert.equal(data.total, undefined);
+    assert.doesNotMatch(JSON.stringify(data), /DO-NOT-LEAK|credentials|"raw"/);
+  });
+});
+
+it("validates detail envelope while retaining untrusted thread data for separate authorization", async () => {
+  for (const payload of [null, [], {}, { id: 3 }]) {
+    await withApi(payload, async client => { await assert.rejects(client.getEmail("fixture"), /Unexpected.*email/); });
+  }
+  await withApi({ id: "fixture", providerMessageId: "provider", archivedAt: "2024-02-29T00:00:00Z", ingestionSource: { id: "source", name: "Mailbox", credentials: "DO-NOT-LEAK" }, thread: [{ id: "candidate", untrusted: "must authorize" }], raw: { type: "Buffer", data: [1, 2] }, isIndexed: true, indexAttempts: 2, isOnLegalHold: false, isJournaled: true, storageHashSha256: "hash" }, async client => {
+    const data = await client.getEmail("fixture");
+    assert.equal(data.providerMessageId, "provider"); assert.equal(data.indexAttempts, 2);
+    assert.equal(data.isOnLegalHold, false); assert.equal(data.isJournaled, true);
+    assert.deepEqual(data.thread, [{ id: "candidate", untrusted: "must authorize" }]);
+    assert.deepEqual(data.raw, { type: "Buffer", data: [1, 2] });
+    assert.doesNotMatch(JSON.stringify(data), /DO-NOT-LEAK|credentials/);
+  });
+});
+
+it("validates upstream search shapes and treats malformed totals as unknown", async () => {
+  for (const payload of [null, [], {}, { hits: {} }, { hits: [null] }, { hits: [{ id: 12 }] }]) {
+    await withApi(payload, async client => { await assert.rejects(client.search({ keywords: "x" }), /Unexpected.*search/); });
+  }
+  await withApi({ hits: [{ id: "one", subject: "safe", to: "not-an-array", raw: "secret" }], total: "99", page: 1, limit: 10 }, async client => {
+    const data = await client.search({ keywords: "x" });
+    assert.equal(data.total, undefined);
+    assert.equal(data.hits[0].to, undefined);
+    assert.equal((data.hits[0] as unknown as Record<string, unknown>).raw, undefined);
+  });
+});
+
+it("rejects excessive encoded request URLs before fetching", async () => {
+  let calls = 0;
+  const client = new OpenArchiverClient("https://host", "fixture", async () => { calls++; return jsonResponse({}); });
+  const value = "a".repeat(250) + "@example.com";
+  await assert.rejects(client.search({ keywords: "x", filters: { from: Array(20).fill(value), to: Array(20).fill(value) } }), /URL.*limit/);
+  assert.equal(calls, 0);
+});
+
+it("forwards filter-only mailbox searches with explicit false over HTTP", async () => {
+  await withApi({ hits: [], total: 0, page: 1, limit: 10, totalPages: 0, processingTimeMs: 1 }, async (client, requests) => {
+    await client.search({ filters: { mailboxes: [" User@Example.COM "], hasAttachments: false } } as never);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].searchParams.get("mailboxes"), "user@example.com");
+    assert.equal(requests[0].searchParams.get("hasAttachments"), "false");
+    assert.equal(requests[0].searchParams.has("filters"), false);
+    assert.equal(requests[0].searchParams.get("keywords"), "");
+  });
+});
 import {
   OpenArchiverClient,
   OpenArchiverError,
@@ -83,7 +163,7 @@ describe("OpenArchiverClient security", () => {
       assert.throws(() => new OpenArchiverClient(base, "key"), /OPENARCHIVER_BASE_URL/);
     }
     const recorded: Recorded[] = [];
-    await new OpenArchiverClient("https://host/", "key", stubFetch(jsonResponse({}), recorded)).search({ keywords: "x" });
+    await new OpenArchiverClient("https://host/", "key", stubFetch(jsonResponse({ hits: [], total: 0, page: 1, limit: 10, totalPages: 0, processingTimeMs: 0 }), recorded)).search({ keywords: "x" });
     assert.equal(new URL(recorded[0].url).pathname, "/api/v1/search");
   });
 });

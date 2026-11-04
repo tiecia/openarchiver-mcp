@@ -18,6 +18,14 @@ function clientWith(response: Response): OpenArchiverClient {
   return new OpenArchiverClient("https://host/api/v1", "test-secret", async () => response);
 }
 
+const jsonOperations = ["search", "getEmail", "checkIntegrity", "listArchive", "suggestValues"] as const;
+function jsonRequest(client: OpenArchiverClient, operation: typeof jsonOperations[number]): Promise<unknown> {
+  if (operation === "search") return client.search({ keywords: "x" });
+  if (operation === "listArchive") return client.listArchive({ ingestionSourceId: "12345678-1234-1234-1234-123456789abc" });
+  if (operation === "suggestValues") return client.suggestValues({ field: "from" });
+  return client[operation]("id");
+}
+
 describe("bounded secure transport", () => {
   it("does not trust a stream exception merely named OpenArchiverError", async () => {
     const response = new Response(new ReadableStream({
@@ -45,7 +53,7 @@ describe("bounded secure transport", () => {
     } finally { await close(server); }
   });
   it("sanitizes stream read failures and attempts cancellation", async () => {
-    for (const operation of ["search", "download"] as const) {
+    for (const operation of [...jsonOperations, "download"] as const) {
       let cancelled = false;
       const response = new Response("unused");
       Object.defineProperty(response, "body", { value: {
@@ -56,7 +64,7 @@ describe("bounded secure transport", () => {
         }; },
       } });
       const client = clientWith(response);
-      await assert.rejects(operation === "search" ? client.search({ keywords: "x" }) : client.download("a/b"), (error: unknown) => {
+      await assert.rejects(operation === "download" ? client.download("a/b") : jsonRequest(client, operation), (error: unknown) => {
         assert.ok(error instanceof OpenArchiverError);
         assert.equal(error.message, "Failed to read OpenArchiver response body.");
         return true;
@@ -89,7 +97,7 @@ describe("bounded secure transport", () => {
     }
   });
   it("rejects malformed or over-cap Content-Length before reading and cancels", { timeout: 1000 }, async () => {
-    for (const operation of ["search", "download"] as const) {
+    for (const operation of [...jsonOperations, "download"] as const) {
       for (const length of ["-1", "1.5", "1e3", "NaN", "3, 3", "9007199254740992", "33554433"]) {
         let cancelled = false;
         const response = new Response(new ReadableStream({
@@ -97,7 +105,7 @@ describe("bounded secure transport", () => {
           cancel() { cancelled = true; },
         }), { headers: { "content-length": length } });
         const client = clientWith(response);
-        await assert.rejects(operation === "search" ? client.search({ keywords: "x" }) : client.download("a/b"), OpenArchiverError);
+        await assert.rejects(operation === "download" ? client.download("a/b") : jsonRequest(client, operation), OpenArchiverError);
         assert.equal(cancelled, true, `${operation}: ${length}`);
       }
     }
@@ -114,7 +122,7 @@ describe("bounded secure transport", () => {
     assert.equal(cancelled, true);
   });
   it("rejects chunked JSON over 32 MiB and cancels each JSON endpoint body", async () => {
-    for (const operation of ["search", "getEmail", "checkIntegrity"] as const) {
+    for (const operation of jsonOperations) {
       let sent = 0;
       let cancelled = false;
       const chunk = new Uint8Array(1024 * 1024).fill(32);
@@ -126,15 +134,15 @@ describe("bounded secure transport", () => {
         cancel() { cancelled = true; },
       }));
       const client = clientWith(response);
-      const promise = operation === "search" ? client.search({ keywords: "x" }) : client[operation]("id");
+      const promise = jsonRequest(client, operation);
       await assert.rejects(promise, /Response exceeds the 33554432 byte limit/);
       assert.equal(cancelled, true);
     }
   });
   it("sanitizes malformed JSON parse errors for every JSON endpoint", async () => {
-    for (const operation of ["search", "getEmail", "checkIntegrity"] as const) {
+    for (const operation of jsonOperations) {
       const client = clientWith(new Response('private-secret invalid JSON'));
-      const promise = operation === "search" ? client.search({ keywords: "x" }) : client[operation]("id");
+      const promise = jsonRequest(client, operation);
       await assert.rejects(promise, (error: unknown) => {
         assert.ok(error instanceof OpenArchiverError);
         assert.equal(error.message, "Invalid JSON response from OpenArchiver.");
