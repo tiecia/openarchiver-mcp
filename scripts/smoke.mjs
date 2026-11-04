@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-const EXPECTED = ["search_archive", "get_email", "get_attachment", "check_integrity"];
+const EXPECTED = ["search_archive", "list_archive", "suggest_archive_values", "get_email", "get_email_thread", "get_email_source", "get_attachment", "check_integrity"];
 
 // The version a client shows for this server comes from serverInfo, so it must track
 // package.json. It was hardcoded (and stale by three releases) until v1.3.1.
@@ -22,6 +22,7 @@ const env = { ...process.env };
 delete env.OPENARCHIVER_BASE_URL;
 delete env.OPENARCHIVER_API_KEY;
 delete env.OPENARCHIVER_ENABLE_ATTACHMENTS;
+delete env.OPENARCHIVER_ENABLE_RAW_EXPORT;
 delete env.OPENARCHIVER_ALLOW_HTTP_LOOPBACK;
 
 const transport = new StdioClientTransport({

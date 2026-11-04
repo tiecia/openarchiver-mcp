@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { verifyRuntime } from "./verify-runtime-bundle.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+export const runtimeDocuments = ["LICENSE", "README.md"]; // Maintained documents only.
 const asset = "openarchiver-mcp-linux-x64.tar.gz";
 const sha256 = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
 const run = (command, args, cwd = repo) => execFileSync(command, args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
@@ -40,7 +41,7 @@ export async function buildBundle({ outputDir, releaseTag, sourceSha }) {
   const epoch = Number(run("git", ["show", "-s", "--format=%ct", sourceSha]).trim());
   const dirty = run("git", ["status", "--porcelain", "--untracked-files=normal"]).trim() !== "";
   validateSourceTree(join(repo, "src"));
-  const inputs = ["package.json", "package-lock.json", "tsconfig.json", "LICENSE", "SECURITY-HARDENING.md",
+  const inputs = ["package.json", "package-lock.json", "tsconfig.json", ...runtimeDocuments,
     ...files(join(repo, "src")).map((path) => `src/${path}`),
     "scripts/build-runtime-bundle.mjs", "scripts/verify-runtime-bundle.mjs"];
   const sourceInputsSha256 = Object.fromEntries(inputs.sort().map((name) => [name, sha256(join(repo, name))]));
@@ -58,7 +59,7 @@ export async function buildBundle({ outputDir, releaseTag, sourceSha }) {
     const stage = join(temp, "stage");
     const root = join(stage, "openarchiver-mcp");
     mkdirSync(root, { recursive: true });
-    for (const name of ["package.json", "package-lock.json", "LICENSE", "SECURITY-HARDENING.md"]) {
+    for (const name of ["package.json", "package-lock.json", ...runtimeDocuments]) {
       copyFileSync(join(repo, name), join(root, name));
     }
     cpSync(join(repo, "dist"), join(root, "dist"), { recursive: true, filter: (path) => !/\.test\.js(?:\.map)?$/.test(path) });

@@ -29,7 +29,7 @@ test("builds a reproducible production archive and verifies the extracted runtim
       assert.equal(readFileSync(join(output, "SHA256SUMS"), "utf8"), `${hash}  openarchiver-mcp-linux-x64.tar.gz\n`);
       const entries = run("tar", ["-tzf", archive]).trim().split("\n");
       for (const file of ["dist/index.js", "dist/mime-worker.js", "package.json", "package-lock.json",
-        "LICENSE", "SECURITY-HARDENING.md", "BUILD-INFO.json", "scripts/verify-runtime-bundle.mjs", "node_modules/mailparser/package.json"]) {
+        "LICENSE", "README.md", "BUILD-INFO.json", "scripts/verify-runtime-bundle.mjs", "node_modules/mailparser/package.json"]) {
         assert.ok(entries.includes(`openarchiver-mcp/${file}`), file);
       }
       assert.ok(!entries.some((entry) => /dist\/.*\.test\.|node_modules\/(typescript|@typescript)\//.test(entry)));

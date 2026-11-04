@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
-import { validateRuntimeTree } from "./build-runtime-bundle.mjs";
+import { validateRuntimeTree, runtimeDocuments } from "./build-runtime-bundle.mjs";
+
+test("bundle documents match the maintained source tree without deleted documents", () => {
+  assert.deepEqual(runtimeDocuments, ["LICENSE", "README.md"]);
+});
 
 function fixture(t) {
   const temp = mkdtempSync(join(tmpdir(), "bundle-safety-"));

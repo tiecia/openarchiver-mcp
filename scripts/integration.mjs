@@ -161,6 +161,7 @@ async function runMcpAssertions(apiKey) {
       // Test fixture only: production requires HTTPS and attachments stay off.
       OPENARCHIVER_ALLOW_HTTP_LOOPBACK: "true",
       OPENARCHIVER_ENABLE_ATTACHMENTS: "true",
+      OPENARCHIVER_ENABLE_RAW_EXPORT: "false",
     },
   });
   const client = new Client({ name: "integration-test", version: "0.0.0" });
@@ -189,18 +190,20 @@ async function runMcpAssertions(apiKey) {
     // 4. get_email on the attachment message, then get_attachment on note.txt.
     //    Find a hit that actually carries the note.txt attachment.
     let storagePath;
+    let attachmentEmailId;
     for (const hitId of [...search.matchAll(/^\s*id:\s*(\S+)/gm)].map((m) => m[1])) {
       const detail = toolText(await client.callTool({ name: "get_email", arguments: { id: hitId } }));
       const path = detail.match(/storagePath:\s*(\S+)/)?.[1];
       if (path && path !== "?") {
         storagePath = path;
+        attachmentEmailId = hitId;
         break;
       }
     }
     assert.ok(storagePath, "no attachment storagePath found across the needle emails");
     console.log(`  get_email ok (attachment storagePath ${storagePath})`);
 
-    const attachment = toolText(await client.callTool({ name: "get_attachment", arguments: { path: storagePath } }));
+    const attachment = toolText(await client.callTool({ name: "get_attachment", arguments: { emailId: attachmentEmailId, path: storagePath } }));
     // OpenArchiver's /storage/download always serves application/octet-stream, so the
     // MCP classifies even note.txt as a binary "blob" and returns base64. Accept either
     // the raw text (if a future version sets a text content-type) or the decoded base64.
@@ -215,6 +218,32 @@ async function runMcpAssertions(apiKey) {
     // 5. Robustness: an unknown id surfaces a clean error, not a crash.
     const missing = await client.callTool({ name: "get_email", arguments: { id: "does-not-exist" } });
     assert.ok(missing.isError, "get_email with an unknown id should return isError");
+    // 6. New read paths, without enabling raw exports.
+    const metaResult = await client.callTool({ name: "get_email", arguments: { id, view: "metadata" } });
+    toolText(metaResult);
+    const meta = metaResult.structuredContent?.email;
+    assert.ok(meta && meta.id === id, "metadata mode did not return the selected message");
+    const sourceId = meta.ingestionSourceId ?? meta.ingestionSource?.id;
+    assert.ok(sourceId, "message metadata did not identify the fixture source");
+    const listing = await client.callTool({ name: "list_archive", arguments: { ingestionSourceId: sourceId, limit: 100 } });
+    toolText(listing);
+    assert.equal(listing.structuredContent?.totalKind, "exact_source_rows");
+    const headers = await client.callTool({ name: "get_email_source", arguments: { id, view: "headers" } });
+    toolText(headers);
+    assert.ok(headers.structuredContent, "original headers missing structured content");
+    const thread = await client.callTool({ name: "get_email_thread", arguments: { emailId: id } });
+    toolText(thread);
+    const gated = await client.callTool({ name: "get_email_source", arguments: { id, view: "raw_file" } });
+    assert.ok(gated.isError, "raw export must stay disabled independently of test attachments");
+    if (/^v0\.6\.[2-9]/.test(OA_IMAGE_TAG)) {
+      const facets = await client.callTool({ name: "suggest_archive_values", arguments: { field: "mailboxes" } });
+      toolText(facets);
+      const filtered = await client.callTool({ name: "search_archive", arguments: { filters: { sources: [sourceId] }, limit: 100 } });
+      toolText(filtered);
+      assert.equal(filtered.structuredContent?.totalKind, "estimated");
+    }
+    console.log("  structured metadata, source listing, headers, authorized thread and raw-export gate ok");
+
     console.log("  get_email(unknown id) ok (clean error)");
   } finally {
     await client.close();

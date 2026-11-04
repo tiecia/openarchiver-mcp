@@ -45,7 +45,7 @@ test("unsafe TMPDIR errors stay sanitized and do not prevent signal shutdown", a
         setTimeout(() => reject(new Error("failed temp allocation prevented shutdown")), 1500).unref();
       })]);
       assert.deepEqual(await readdir(root), []);
-    }, { TMPDIR: link, OPENARCHIVER_ENABLE_ATTACHMENTS: "true" });
+    }, { TMPDIR: link, OPENARCHIVER_ENABLE_ATTACHMENTS: "true", OPENARCHIVER_ENABLE_RAW_EXPORT: "true" });
   } finally { await rm(link, { force: true }); await rm(root, { recursive: true, force: true }); }
 });
 
@@ -112,7 +112,7 @@ test("deeply nested HTML get_email returns a controlled error before the worker 
     assert.equal(result.isError, true);
     assert.equal(textOf(result), "Error: OpenArchiver request failed. Please retry or check the server configuration.");
     assert.ok(performance.now() - started < 3000, "structural rejection must beat the hard worker deadline");
-    assert.equal((await client.listTools()).tools.length, 4);
+    assert.equal((await client.listTools()).tools.length, 8);
   });
 });
 
@@ -141,7 +141,7 @@ test("close aborts active MIME worker CPU loops and drains the gate promptly", a
     await Promise.race([started, new Promise<never>((_resolve, reject) => {
       setTimeout(() => reject(new Error("MIME worker never started")), 2000).unref();
     })]);
-    assert.equal((await client.listTools()).tools.length, 4);
+    assert.equal((await client.listTools()).tools.length, 8);
     const closing = performance.now();
     await runtime.close();
     assert.ok(performance.now() - closing < 1000, "shutdown must abort rather than wait for the MIME deadline");
@@ -167,13 +167,13 @@ test("MIME worker deadline returns a controlled error and leaves the MCP server 
     await client.connect(a);
     const started = performance.now();
     const pending = client.callTool({ name: "get_email", arguments: { id: "x" } });
-    assert.equal((await client.listTools()).tools.length, 4);
+    assert.equal((await client.listTools()).tools.length, 8);
     const result = await pending;
     const elapsed = performance.now() - started;
     assert.equal(result.isError, true);
     assert.equal(textOf(result), "Error: OpenArchiver request failed. Please retry or check the server configuration.");
     assert.ok(elapsed >= 2800 && elapsed < 4500, `three-second deadline elapsed ${elapsed}ms`);
-    assert.equal((await client.listTools()).tools.length, 4);
+    assert.equal((await client.listTools()).tools.length, 8);
   } finally { await client.close(); await runtime.close(); }
 });
 
@@ -257,6 +257,8 @@ async function withStdio(
   run: (client: Client, transport: StdioClientTransport) => Promise<void>,
   extraEnv: Record<string, string> = {},
 ): Promise<void> {
+  // Download/cleanup fixtures opt into both flags explicitly for legacy path-only calls.
+  // Attachment-only association and raw-policy denials live in download-policy.test.ts.
   const http = createHttpServer(handler);
   http.listen(0, "127.0.0.1");
   await once(http, "listening");
@@ -271,6 +273,7 @@ async function withStdio(
       OPENARCHIVER_API_KEY: "test-secret-key",
       OPENARCHIVER_ALLOW_HTTP_LOOPBACK: "true",
       OPENARCHIVER_ENABLE_ATTACHMENTS: "false",
+      OPENARCHIVER_ENABLE_RAW_EXPORT: "false",
       ...extraEnv,
     },
     stderr: "pipe",
@@ -298,7 +301,7 @@ test("inline downloads use the default five-million-byte limit before body reads
   }, async (client) => {
     const result = await client.callTool({ name: "get_attachment", arguments: { path: "fixture" } }, undefined, { timeout: 2000 });
     assert.equal(result.isError, true);
-  }, { OPENARCHIVER_ENABLE_ATTACHMENTS: "true" });
+  }, { OPENARCHIVER_ENABLE_ATTACHMENTS: "true", OPENARCHIVER_ENABLE_RAW_EXPORT: "true" });
 });
 
 test("text budgets apply to search, integrity and both inline attachment encodings", async () => {
@@ -319,11 +322,17 @@ test("text budgets apply to search, integrity and both inline attachment encodin
       mime = call.mime ?? "application/json";
       const result = await client.callTool({ name: call.name, arguments: call.arguments });
       assert.ok(!result.isError, textOf(result));
-      assert.equal(textOf(result).length, 64_000);
+      if (call.name === "get_attachment") {
+        assert.equal(textOf(result).length, 64_000);
+        assert.match(textOf(result), /\[TRUNCATED:.*\]$/);
+      } else {
+        assert.ok(Buffer.byteLength(JSON.stringify(result)) <= 64_000);
+        assert.ok(result.structuredContent, "structured archive tools retain valid bounded JSON");
+        assert.match(JSON.stringify(result), /truncat/i);
+      }
       assert.match(textOf(result), /^UNTRUSTED/);
-      assert.match(textOf(result), /\[TRUNCATED:.*\]$/);
     }
-  }, { OPENARCHIVER_ENABLE_ATTACHMENTS: "true" });
+  }, { OPENARCHIVER_ENABLE_ATTACHMENTS: "true", OPENARCHIVER_ENABLE_RAW_EXPORT: "true" });
 });
 
 test("shutdown cancels active fetches, rejects queued downloads and removes existing files", async () => {
@@ -350,7 +359,7 @@ test("shutdown cancels active fetches, rejects queued downloads and removes exis
       await Promise.all(pending);
       assert.equal(count, 3, "queued download must never start");
       assert.deepEqual(await readdir(root), []);
-    }, { TMPDIR: root, OPENARCHIVER_ENABLE_ATTACHMENTS: "true" });
+    }, { TMPDIR: root, OPENARCHIVER_ENABLE_ATTACHMENTS: "true", OPENARCHIVER_ENABLE_RAW_EXPORT: "true" });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -370,7 +379,7 @@ test("shutdown aborts stalled response bodies after headers", async () => {
       setTimeout(() => reject(new Error("response body was not aborted")), 1500).unref();
     })]);
     await call;
-  }, { OPENARCHIVER_ENABLE_ATTACHMENTS: "true" });
+  }, { OPENARCHIVER_ENABLE_ATTACHMENTS: "true", OPENARCHIVER_ENABLE_RAW_EXPORT: "true" });
 });
 
 test("SIGINT and SIGTERM clean private files before exiting", async () => {
@@ -385,7 +394,7 @@ test("SIGINT and SIGTERM clean private files before exiting", async () => {
         process.kill(transport.pid, signal);
         await closed;
         assert.deepEqual(await readdir(root), []);
-      }, { TMPDIR: root, OPENARCHIVER_ENABLE_ATTACHMENTS: "true" });
+      }, { TMPDIR: root, OPENARCHIVER_ENABLE_ATTACHMENTS: "true", OPENARCHIVER_ENABLE_RAW_EXPORT: "true" });
     } finally { await rm(root, { recursive: true, force: true }); }
   }
 });
@@ -398,8 +407,8 @@ test("large inline images return a controlled file-mode error without closing st
     const result = await client.callTool({ name: "get_attachment", arguments: { path: "image", maxBytes: 10 * 1024 * 1024 } });
     assert.equal(result.isError, true);
     assert.match(textOf(result), /file mode/);
-    assert.equal((await client.listTools()).tools.length, 4);
-  }, { OPENARCHIVER_ENABLE_ATTACHMENTS: "true" });
+    assert.equal((await client.listTools()).tools.length, 8);
+  }, { OPENARCHIVER_ENABLE_ATTACHMENTS: "true", OPENARCHIVER_ENABLE_RAW_EXPORT: "true" });
 });
 
 test("enabled attachment text, binary and image responses carry an untrusted-data notice", async () => {
@@ -415,7 +424,7 @@ test("enabled attachment text, binary and image responses carry an untrusted-dat
       assert.match(textOf(result), /^UNTRUSTED ATTACHMENT DATA/);
       if (kind === "image/png") assert.ok((result.content as { type: string }[]).some((part) => part.type === "image"));
     }
-  }, { OPENARCHIVER_ENABLE_ATTACHMENTS: "true" });
+  }, { OPENARCHIVER_ENABLE_ATTACHMENTS: "true", OPENARCHIVER_ENABLE_RAW_EXPORT: "true" });
 });
 
 test("normal MCP close removes only this process's attachment directory", async () => {
@@ -425,7 +434,7 @@ test("normal MCP close removes only this process's attachment directory", async 
       const result = await client.callTool({ name: "get_attachment", arguments: { path: "fixture", mode: "file" } });
       assert.ok(!result.isError, textOf(result));
       assert.equal((await readdir(root)).length, 1);
-    }, { TMPDIR: root, OPENARCHIVER_ENABLE_ATTACHMENTS: "true" });
+    }, { TMPDIR: root, OPENARCHIVER_ENABLE_ATTACHMENTS: "true", OPENARCHIVER_ENABLE_RAW_EXPORT: "true" });
     assert.deepEqual(await readdir(root), []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -438,7 +447,9 @@ test("file attachments use a private random directory and sanitized exclusive 06
       response.setHeader("content-disposition", 'attachment; filename="../../escape.txt"');
       response.end("fixture");
     }, async (client) => {
-      const result = await client.callTool({ name: "get_attachment", arguments: { path: "fixture/attachment", mode: "file", outputPath: "../../ignored-output-path" } });
+      const rejected = await client.callTool({ name: "get_attachment", arguments: { path: "fixture/attachment", mode: "file", outputPath: "../../ignored-output-path" } });
+      assert.equal(rejected.isError, true);
+      const result = await client.callTool({ name: "get_attachment", arguments: { path: "fixture/attachment", mode: "file" } });
       assert.ok(!result.isError, textOf(result));
       const target = textOf(result).split("\n").at(-1)!;
       const dir = dirname(target);
@@ -448,7 +459,7 @@ test("file attachments use a private random directory and sanitized exclusive 06
       assert.equal(await readFile(target, "utf8"), "fixture");
       assert.match(target, /-escape\.txt$/);
       assert.equal((await readdir(dir)).length, 1);
-    }, { TMPDIR: root, OPENARCHIVER_ENABLE_ATTACHMENTS: "true" });
+    }, { TMPDIR: root, OPENARCHIVER_ENABLE_ATTACHMENTS: "true", OPENARCHIVER_ENABLE_RAW_EXPORT: "true" });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -468,10 +479,10 @@ test("attachments enforce caller limits before reading and reject limits above t
     const excessive = await client.callTool({ name: "get_attachment", arguments: { path: "x", maxBytes: 10 * 1024 * 1024 + 1 } });
     assert.equal(excessive.isError, true);
     assert.equal(requests, 2, "invalid cap must not fetch");
-  }, { OPENARCHIVER_ENABLE_ATTACHMENTS: "true", OPENARCHIVER_TIMEOUT_MS: "30000" });
+  }, { OPENARCHIVER_ENABLE_ATTACHMENTS: "true", OPENARCHIVER_ENABLE_RAW_EXPORT: "true", OPENARCHIVER_TIMEOUT_MS: "30000" });
 });
 
-test("text responses include visible truncation within a fixed 64000-character budget", async () => {
+test("text and structured message responses visibly mark field truncation within their combined byte budget", async () => {
   await withStdio((_request, response) => {
     response.setHeader("content-type", "application/json");
     response.end(JSON.stringify({ id: "x", subject: "x".repeat(100_000) }));
@@ -479,9 +490,10 @@ test("text responses include visible truncation within a fixed 64000-character b
     const result = await client.callTool({ name: "get_email", arguments: { id: "x" } });
     assert.ok(!result.isError);
     const output = textOf(result);
-    assert.equal(output.length, 64_000);
+    assert.ok(Buffer.byteLength(JSON.stringify(result)) <= 64_000);
     assert.match(output, /^UNTRUSTED ARCHIVE DATA/);
-    assert.ok(output.endsWith("\n[TRUNCATED: response exceeded the 64000-character output budget.]"));
+    const structured = result.structuredContent as { email: { truncatedFields: string[] } };
+    assert.ok(structured.email.truncatedFields.includes("subject"));
   });
 });
 
@@ -516,7 +528,7 @@ test("get_email rejects invalid serialized MIME bytes before parsing", async () 
   });
 });
 
-test("all four MCP tools share a two-active eight-queued operation gate", async () => {
+test("all eight MCP tools share a two-active eight-queued operation gate", async () => {
   let requests = 0;
   let active = 0;
   let maximumActive = 0;
@@ -532,15 +544,25 @@ test("all four MCP tools share a two-active eight-queued operation gate", async 
     if (requests <= 2) await blocked;
     active--;
     response.setHeader("content-type", "application/json");
-    if (request.url?.includes("/search")) response.end(JSON.stringify({ hits: [], total: 0 }));
+    if (request.url?.includes("/search/facets")) response.end(JSON.stringify({ values: [] }));
+    else if (request.url?.includes("/search")) response.end(JSON.stringify({ hits: [], total: 0 }));
     else if (request.url?.includes("/integrity")) response.end("[]");
-    else if (request.url?.includes("/archived-emails")) response.end('{"id":"x"}');
+    else if (request.url?.includes("/ingestion-source/")) response.end(JSON.stringify({ items: [], total: 0, page: 1, limit: 10 }));
+    else if (request.url?.includes("/archived-emails")) response.end(JSON.stringify({ id: "00000000-0000-4000-8000-000000000001", raw: Buffer.from("Subject: fixture\r\n\r\nbody") }));
     else response.end("x");
   }, async (client) => {
-    const calls = Array.from({ length: 10 }, (_, i) => client.callTool({
-      name: ["search_archive", "get_email", "check_integrity", "get_attachment"][i % 4],
-      arguments: i % 4 === 0 ? { keywords: "x" } : i % 4 === 3 ? { path: "x" } : { id: "x" },
-    }));
+    const id = "00000000-0000-4000-8000-000000000001";
+    const tools = [
+      { name: "search_archive", arguments: { keywords: "x" } },
+      { name: "get_email", arguments: { id } },
+      { name: "check_integrity", arguments: { id } },
+      { name: "get_attachment", arguments: { path: "x" } },
+      { name: "get_email_source", arguments: { id } },
+      { name: "get_email_thread", arguments: { emailId: id } },
+      { name: "list_archive", arguments: { ingestionSourceId: id } },
+      { name: "suggest_archive_values", arguments: { field: "mailboxes" } },
+    ];
+    const calls = Array.from({ length: 10 }, (_, i) => client.callTool(tools[i % tools.length]));
     try {
       // MCP requests are ordered on stdio; overflow comes after the ten above.
       const overflow = await client.callTool({ name: "search_archive", arguments: { keywords: "overflow" } });
@@ -554,7 +576,7 @@ test("all four MCP tools share a two-active eight-queued operation gate", async 
     }
     assert.equal(maximumActive, 2);
     assert.equal(requests, 10);
-  }, { OPENARCHIVER_ENABLE_ATTACHMENTS: "true" });
+  }, { OPENARCHIVER_ENABLE_ATTACHMENTS: "true", OPENARCHIVER_ENABLE_RAW_EXPORT: "true" });
 });
 
 test("attachments are disabled by default and never fetch", async () => {
