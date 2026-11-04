@@ -1,28 +1,87 @@
-name: Release
+name: Runtime release
 
-# Publishes to npm when a version tag (vX.Y.Z) is pushed.
-# Uses npm Trusted Publishing (OIDC) — no NPM_TOKEN secret is stored; npm
-# verifies the GitHub Actions identity and attaches a provenance attestation.
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write # required for OIDC trusted publishing + provenance
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.bundle.outputs.tag }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          node-version: "26"
-          registry-url: "https://registry.npmjs.org"
-          cache: "npm"
-      - run: npm install -g npm@latest # ensure a version with trusted publishing
-      - run: npm ci
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '26.7.0'
+          cache: npm
+      - run: npm ci --ignore-scripts
       - run: npm test
       - run: node scripts/smoke.mjs
-      - run: npm publish --provenance --access public
+      - run: npm audit
+      - run: npm audit --omit=dev
+      - name: Packaging and publisher regression tests (no remote writes)
+        run: node --test scripts/runtime-bundle.test.mjs scripts/runtime-bundle-safety.test.mjs scripts/publish-runtime-release.test.mjs
+      - name: Build and smoke extracted release archive
+        id: bundle
+        env:
+          RELEASE_TAG: bundle-v1.0.${{ github.run_number }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          node scripts/build-runtime-bundle.mjs \
+            --output-dir "$RUNNER_TEMP/runtime-release" \
+            --release-tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: runtime-release
+          path: |
+            ${{ runner.temp }}/runtime-release/openarchiver-mcp-linux-x64.tar.gz
+            ${{ runner.temp }}/runtime-release/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
+
+  publish:
+    needs: build
+    if: >-
+      github.repository == 'tiecia/openarchiver-mcp' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '26.7.0'
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: runtime-release
+          path: ${{ runner.temp }}/runtime-release
+      - name: Publish verified assets, never npm or a container image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          node scripts/publish-runtime-release.mjs \
+            --artifact-dir "$RUNNER_TEMP/runtime-release" \
+            --release-tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA"
