@@ -1,18 +1,5 @@
 # openarchiver-mcp
 
-> **Security fork:** See [SECURITY-HARDENING.md](SECURITY-HARDENING.md) before use.
-> This branch adds transport, resource and temporary-file protections; attachment downloads
-> are disabled unless explicitly enabled. Build this fork from a reviewed commit with
-> `npm ci --ignore-scripts`; the upstream npm package and `npx` examples below do **not**
-> include this fork's changes. On the homelab, use Bitwarden + External Secrets Operator
-> for the API key, not a plaintext `.env` file. Upstream badges/compatibility claims below
-> describe the upstream project, not independent validation of this fork.
->
-> **Runtime delivery:** [RUNTIME-RELEASES.md](RUNTIME-RELEASES.md) documents verified,
-> versioned Linux x64 bundles baked into the existing Hermes image, including the
-> bundled installed-tree smoke command, checksums and release bootstrap. Node >=26
-> is supplied separately by the image; this fork does not publish to npm.
-
 [![npm version](https://img.shields.io/npm/v/openarchiver-mcp)](https://www.npmjs.com/package/openarchiver-mcp)
 [![CI](https://github.com/arnd/openarchiver-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/arnd/openarchiver-mcp/actions/workflows/ci.yml)
 [![MCP Badge](https://lobehub.com/badge/mcp/arnd-openarchiver-mcp)](https://lobehub.com/mcp/arnd-openarchiver-mcp)
