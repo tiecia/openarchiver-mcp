@@ -81,7 +81,7 @@ OpenArchiver API and does not establish production authorization/integration.
 
 ## Automation and bootstrap
 
-`.github/workflows/release.yml` replaces inherited npm publishing. Pull requests
+`.github/workflows/runtime-release.yml` is the fork's only Actions workflow. The inherited CI, integration, npm-release and snapshot-check workflows are removed; this workflow retains unit, MCP smoke, audit and packaging coverage without upstream snapshot PR automation or npm publication. Pull requests
 build/test/audit/package without publishing. Only successful main push/manual runs
 in **exactly** `tiecia/openarchiver-mcp` reach a separate `contents: write` job.
 Build jobs have only `contents: read`; there is no npm OIDC permission, npm publish,
